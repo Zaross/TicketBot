@@ -9,6 +9,9 @@ class Translator(discord.app_commands.Translator):
                 "Test, if the bot is responding.": "Teste, ob der Bot antwortet.",
                 "Get information about the bot.": "Erhalte Informationen über den Bot.",
                 "change_nickname": "nickname_ändern",
+                "creates the ticketsystem.": "Erstellt das Ticketsystem.",
+                "create_ticketsystem": "ticketsystem_erstellen",
+                
                 },
             discord.Locale.japanese: {
                 "ping": "ピング",

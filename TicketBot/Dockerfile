@@ -30,6 +30,6 @@ LABEL maintainer="Discord: zaros. (411763301169496084)" \
       description="Basic discord ticketbot." \
       release=$BUILD_DATE \
       VERSION="1.0.0" \
-      url="https://github.com/Zaross/Ticketbot"
+      url="https://github.com/Zaross/TicketBot"
 
 CMD ["python3", "main.py"]

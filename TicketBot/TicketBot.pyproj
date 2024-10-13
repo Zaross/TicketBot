@@ -28,12 +28,13 @@
     <Compile Include="CustomModules\context_commands.py" />
     <Compile Include="CustomModules\log_handler.py" />
     <Compile Include="CustomModules\ticket.py" />
-    <Compile Include="Dockerfile.template" />
+    <Compile Include="Dockerfile" />
     <Compile Include="main.py" />
     <Compile Include="__init__.py" />
   </ItemGroup>
   <ItemGroup>
     <Content Include=".env" />
+    <Content Include=".env.template" />
     <Content Include="requirements.txt" />
   </ItemGroup>
   <ItemGroup>

@@ -1,4 +1,4 @@
-#Import
+﻿#Import
 import time
 startupTime_start = time.time()
 import asyncio
@@ -12,7 +12,10 @@ import psutil
 import sentry_sdk
 import signal
 import sys
+import sqlite3
+import random
 from CustomModules.app_translation import Translator as CustomTranslator
+from CustomModules.ticket import TicketHTML as TicketSystem
 from CustomModules import log_handler
 from dotenv import load_dotenv
 from typing import Optional, Any
@@ -28,7 +31,9 @@ os.makedirs(f'{APP_FOLDER_NAME}//Buffer', exist_ok=True)
 LOG_FOLDER = f'{APP_FOLDER_NAME}//Logs//'
 BUFFER_FOLDER = f'{APP_FOLDER_NAME}//Buffer//'
 ACTIVITY_FILE = f'{APP_FOLDER_NAME}//activity.json'
+SQL_FILE = os.path.join(APP_FOLDER_NAME, f'{APP_FOLDER_NAME}.db')
 BOT_VERSION = "1.0.0"
+FOOTER_TEXT = 'Ticketbot'
 sentry_sdk.init(
     dsn=os.getenv('SENTRY_DSN'),
     traces_sample_rate=1.0,
@@ -44,7 +49,7 @@ LOG_LEVEL = os.getenv('LOG_LEVEL')
 log_manager = log_handler.LogManager(LOG_FOLDER, BOT_NAME, LOG_LEVEL)
 discord_logger = log_manager.get_logger('discord')
 program_logger = log_manager.get_logger('Program')
-program_logger.info('Starte System...')
+program_logger.info('Starting System...')
 
 class JSONValidator:
     schema = {
@@ -64,10 +69,10 @@ class JSONValidator:
     }
 
     default_content = {
-        "activity_type": "",
-        "activity_title": "",
-        "activity_url": "",
-        "status": "dnd"
+        "activity_type": "Playing",
+        "activity_title": "Ticketsystem",
+        "activity_url": "https://github.com/Zaross/TicketBot",
+        "status": "online"
     }
 
     def __init__(self, file_path):
@@ -96,8 +101,8 @@ class aclient(discord.AutoShardedClient):
     def __init__(self):
 
         intents = discord.Intents.default()
-        #intents.guild_messages = True
-        #intents.members = True
+        intents.guild_messages = True
+        intents.members = True
 
         super().__init__(owner_id = OWNERID,
                               intents = intents,
@@ -140,6 +145,216 @@ class aclient(discord.AutoShardedClient):
                 return discord.Status.dnd
             elif status == 'invisible':
                 return discord.Status.invisible
+            
+    async def setup_database(self):
+         c.executescript('''
+         CREATE TABLE IF NOT EXISTS "TICKET_SYSTEM" (
+            "ID"	        INTEGER,
+            "GUILD_ID"	    INTEGER NOT NULL,
+            "CHANNEL"	    INTEGER NOT NULL,
+            "EMBED_ID"      INTEGER,
+            "SUPPORT_ROLE"  INTEGER,
+            PRIMARY KEY("ID" AUTOINCREMENT)
+         );
+         CREATE TABLE IF NOT EXISTS "CREATED_TICKETS" (
+            "ID"            INTEGER,
+            "USER_ID"       INTEGER NOT NULL,
+            "CHANNEL_ID"    INTEGER NOT NULL,
+            "GUILD_ID"      INTEGER NOT NULL,
+            "CATEGORY"      TEXT NOT NULL,
+            PRIMARY KEY("ID" AUTOINCREMENT)            
+        )
+         ''')
+         
+    async def on_interaction(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            class AddUserModal(discord.ui.Modal):
+                def __init__(self, channel):
+                    super().__init__(title="Add user to ticket")
+                    self.channel = channel
+
+                    self.user_id_input = discord.ui.TextInput(
+                        label='User-ID',
+                        placeholder='User-ID',
+                        min_length=17,
+                        max_length=21
+                    )
+                    self.add_item(self.user_id_input)
+                
+                async def on_submit(self, interaction: discord.Interaction):
+                    user = self.user_id_input.value
+                    try:
+                        user = await Functions.get_or_fetch('user', int(user))
+                        await self.channel.set_permissions(user, read_messages=True, send_messages=True, read_message_history=True)
+                        await interaction.response.send_message(f'{user.mention} has been added to the ticket.', ephemeral=True)
+                    except Exception as e:
+                        await interaction.response.send_message(f'Error while adding {user.mention}: {e}', ephemeral=True)
+                        
+            class RemoveUserModal(discord.ui.Modal):
+                def __init__(self, channel):
+                    super().__init__(title="Remove user from the ticket")
+                    self.channel = channel
+
+                    self.user_id_input = discord.ui.TextInput(
+                        label='User-ID',
+                        placeholder='User-ID',
+                        min_length=17,
+                        max_length=21
+                    )
+                    self.add_item(self.user_id_input)
+                
+                async def on_submit(self, interaction: discord.Interaction):
+                    user = self.user_id_input.value
+                    try:
+                        user = await Functions.get_or_fetch('user', int(user))
+                        if user == interaction.user:
+                            await interaction.response.send_message(f'You cant remove yourself.', ephemeral=True)
+                            return
+                        await self.channel.set_permissions(user, read_messages=False, send_messages=False, read_message_history=False)
+                        await interaction.response.send_message(f'{user.mention} wurde vom Ticket entfernt.', ephemeral=True)
+                    except Exception as e:
+                        await interaction.response.send_message(f'Error while adding {user.mention} to the ticket: {e}', ephemeral=True)
+
+            class TicketModal(discord.ui.Modal):
+                def __init__(self, category, user):
+                    super().__init__(title='Create a Ticket')
+                    self.category = category
+                    self.user = user
+
+                    self.title_input = discord.ui.TextInput(
+                        label='Titel',
+                        placeholder='Titel of the Ticket'
+                    )
+                    self.add_item(self.title_input)
+
+                    self.description_input = discord.ui.TextInput(
+                        label='Description',
+                        placeholder='Describe the Ticket',
+                        style=discord.TextStyle.paragraph
+                    )
+                    self.add_item(self.description_input)
+
+                async def on_submit(self, interaction: discord.Interaction):
+                    title = self.title_input.value
+                    description = self.description_input.value
+                    category = discord.utils.get(interaction.guild.categories, name='Ticket-Support')
+
+                    if category is None:
+                        category = await interaction.guild.create_category('Ticket-Support')
+
+                    overwrites = {
+                        interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                        interaction.guild.me: discord.PermissionOverwrite(read_messages=True),
+                        self.user: discord.PermissionOverwrite(read_messages=True)
+                    }
+
+
+                    channel_name = f"⚠ ticket-{self.user.name}-{random.randint(1, 9999)}"
+                    ticket_channel = await interaction.guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+                    
+                    ticket_embed = discord.Embed(
+                       title=title,
+                       description=description,
+                       color=discord.Color.blue(),
+                       timestamp=datetime.datetime.now(datetime.timezone.utc)
+                    )
+                    ticket_embed.set_footer(text=f"Ticket created by {self.user}", icon_url=self.user.avatar.url if self.user.avatar else '')
+
+                    admin_embed = discord.Embed(
+                        title="Admincommands",
+                        description="These are the admin commands for the ticket system.",
+                        color=discord.Color.dark_green(),
+                        timestamp=datetime.datetime.now(datetime.timezone.utc)
+                    )
+                    admin_embed.set_footer(text=FOOTER_TEXT, icon_url=bot.user.avatar.url if bot.user.avatar else '')
+
+                    close_button = discord.ui.Button(label="✅ Close", style=discord.ButtonStyle.blurple, custom_id="close_ticket")
+                    add_button = discord.ui.Button(label="➕ Add", style=discord.ButtonStyle.green, custom_id="add_ticket")
+                    remove_button = discord.ui.Button(label="➖ Remove", style=discord.ButtonStyle.red, custom_id="remove_ticket")
+                
+                    admin_view = discord.ui.View()
+                    admin_view.add_item(close_button)
+                    admin_view.add_item(add_button)
+                    admin_view.add_item(remove_button)
+                    
+
+                    await ticket_channel.send(embed=admin_embed, view=admin_view)
+                    await ticket_channel.send(embed=ticket_embed)
+                    try:
+                        c.execute('INSERT INTO CREATED_TICKETS (USER_ID, CHANNEL_ID, GUILD_ID, CATEGORY) VALUES (?, ?, ?, ?)', (self.user.id, ticket_channel.id, interaction.guild.id, self.category))
+                        conn.commit()
+                        program_logger.debug(f'Ticket was succesfully created ({self.user.id}, {ticket_channel.id}, {interaction.guild.id}, {self.category}).')
+                    except Exception as e:
+                        program_logger.error(f'Error while inserting in the database: {e}')
+                    await interaction.response.send_message(f'Your ticket was succesfully created: {ticket_channel.mention}', ephemeral=True)
+
+            class TicketDropdown(discord.ui.Select):
+                def __init__(self):
+                    options = [
+                        discord.SelectOption(label="Discord", description="For general help in the Discord"),
+                        discord.SelectOption(label="Report", description="Report a user on the Discord"),
+                        discord.SelectOption(label="Support", description="For technical assistance"),
+                        discord.SelectOption(label="Bug", description="If you have found a bug"),
+                        discord.SelectOption(label="Feedback", description="If you have feedback to the Discord"),
+                        discord.SelectOption(label="Other", description="For everything else"),
+                    ]
+                    super().__init__(placeholder="Select a ticket topic.", options=options, min_values=1, max_values=1, custom_id="support_menu")
+
+                async def callback(self, interaction: discord.Interaction):
+                    category = self.values[0]
+                    modal = TicketModal(category, interaction.user)
+                    await interaction.response.send_modal(modal)
+
+            class TicketDropdownView(discord.ui.View):
+                def __init__(self):
+                    super().__init__()
+                    self.add_item(TicketDropdown())
+                    if not self.initialized:
+                        return
+
+            if interaction.data and interaction.data.get('component_type') == 3: #3 ist Dropdown
+                button_id = interaction.data.get('custom_id')
+                if button_id == ("support_menu"):
+                    selected_value = interaction.data.get('values', [None])[0]
+                    program_logger.debug(f"Support Menu gewählt: {selected_value}")
+                    category = selected_value
+                    modal = TicketModal(category, interaction.user)
+                    await interaction.response.send_modal(modal)
+                        
+            elif interaction.data and interaction.data.get('component_type') == 2: #2 ist Button
+                button_id = interaction.data.get('custom_id')
+                if button_id == ("close_ticket"):
+                   channel = interaction.channel
+                   c.execute('SELECT * FROM CREATED_TICKETS WHERE CHANNEL_ID = ?', (channel.id,))
+                   data = c.fetchone()
+                   if data is None:
+                       return
+                   await interaction.response.defer(ephemeral=True)
+                   await TicketSystem.create_ticket(bot, interaction.channel.id, data[1])
+                   for user in interaction.channel.members:
+                       with open(f'{BUFFER_FOLDER}ticket-{interaction.channel.id}.html', 'r') as f:
+                            if user == bot.user:
+                                continue
+                            if user.bot:
+                                continue
+                            try:
+                                 await user.send(file=discord.File(f'{BUFFER_FOLDER}ticket-{interaction.channel.id}.html'))
+                            except Exception as e:
+                                program_logger.error(f'Fehler beim senden der Nachricht an {user}\n Fehler: {e}')   
+                   await asyncio.sleep(5)
+                   os.remove(f'{BUFFER_FOLDER}ticket-{interaction.channel.id}.html')
+                   c.execute('DELETE FROM CREATED_TICKETS WHERE CHANNEL_ID = ?', (channel.id,))
+                   conn.commit()
+                   await channel.delete()
+                   
+                elif button_id == ("add_ticket"):
+                    channel = interaction.channel
+                    modal = AddUserModal(channel)
+                    await interaction.response.send_modal(modal)
+                elif button_id == ("remove_ticket"):
+                    channel = interaction.channel
+                    modal = RemoveUserModal(channel)
+                    await interaction.response.send_modal(modal)
 
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError) -> None:
@@ -220,9 +435,12 @@ class aclient(discord.AutoShardedClient):
         program_logger.info(f'I got kicked from {guild}. (ID: {guild.id})')
 
     async def setup_hook(self):
-        global owner, shutdown
+        global owner, shutdown, conn, c
         shutdown = False
         try:
+            conn = sqlite3.connect(SQL_FILE)
+            c = conn.cursor()
+            await self.setup_database()
             owner = await self.fetch_user(OWNERID)
             if owner is None:
                 program_logger.critical(f"Invalid ownerID: {OWNERID}")
@@ -524,11 +742,153 @@ async def self(interaction: discord.Interaction):
 async def self(interaction: discord.Interaction, nick: str):
     await interaction.guild.me.edit(nick=nick)
     await interaction.response.send_message(f'My new nickname is now **{nick}**.', ephemeral=True)
+    
 
+class TicketDropdown(discord.ui.Select):
+        def __init__(self):
+            options = [
+                 discord.SelectOption(label="Discord", description="For general help in the Discord"),
+                 discord.SelectOption(label="Report", description="Report a user on the Discord"),
+                 discord.SelectOption(label="Support", description="For technical assistance"),
+                 discord.SelectOption(label="Bug", description="If you have found a bug"),
+                 discord.SelectOption(label="Feedback", description="If you have feedback to the Discord"),
+                 discord.SelectOption(label="Other", description="For everything else"),
+            ]
+            super().__init__(placeholder="Select a ticket topic.", options=options, min_values=1, max_values=1, custom_id="support_menu")
 
+        async def callback(self, interaction: discord.Interaction):
+            category = self.values[0]
+            modal = TicketModal(category, interaction.user)
+            await interaction.response.send_modal(modal)
 
+class TicketSystemView(discord.ui.View):
+        def __init__(self):
+            super().__init__()
+            self.add_item(TicketDropdown())
 
+class TicketModal(discord.ui.Modal):
+        def __init__(self, category, user):
+            super().__init__(title='Create a Ticket')
+            self.category = category
+            self.user = user
 
+            self.title_input = discord.ui.TextInput(
+                label='Titel',
+                placeholder='Titel of the Ticket'
+            )
+            self.add_item(self.title_input)
+
+            self.description_input = discord.ui.TextInput(
+                label='Description',
+                placeholder='Describe the Ticket',
+                style=discord.TextStyle.paragraph
+            )
+            self.add_item(self.description_input)
+
+        async def on_submit(self, interaction: discord.Interaction):
+            title = self.title_input.value
+            description = self.description_input.value
+            category = discord.utils.get(interaction.guild.categories, name='Ticket-Support')
+
+            if category is None:
+                category = await interaction.guild.create_category('Ticket-Support')
+            
+            c.execute('SELECT * FROM TICKET_SYSTEM WHERE GUILD_ID = ?', (interaction.guild_id,))
+            ticketsystem = c.fetchone()
+            if ticketsystem is None:
+                return
+            admin_role = Functions.get_or_fetch('role', ticketsystem[4])
+            if admin_role is None:
+                return
+
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.guild.me: discord.PermissionOverwrite(read_messages=True),
+                self.user: discord.PermissionOverwrite(read_messages=True),
+                admin_role: discord.PermissionOverwrite(read_messages=True, manage_channels=True) 
+            }
+
+            channel_name = f"⚠ ticket-{self.user.name}-{random.randint(1, 9999)}"
+            ticket_channel = await interaction.guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+
+            ticket_embed = discord.Embed(
+               title=title,
+               description=description,
+               color=discord.Color.blue(),
+               timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            ticket_embed.set_footer(text=f"Ticket created by {self.user}", icon_url=self.user.avatar.url if self.user.avatar else '')
+
+            admin_embed = discord.Embed(
+                title="Admincommands",
+                description="These are the admin commands for the ticket system.",
+                color=discord.Color.purple(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            admin_embed.set_footer(text=FOOTER_TEXT, icon_url=bot.user.avatar.url if bot.user.avatar else '')
+
+            close_button = discord.ui.Button(label="✅ Close", style=discord.ButtonStyle.blurple, custom_id="close_ticket")
+            add_button = discord.ui.Button(label="➕ Add", style=discord.ButtonStyle.green, custom_id="add_ticket")
+            remove_button = discord.ui.Button(label="➖ Remove", style=discord.ButtonStyle.red, custom_id="remove_ticket")
+            
+            admin_view = discord.ui.View()
+            admin_view.add_item(close_button)
+            admin_view.add_item(add_button)
+            admin_view.add_item(remove_button)
+
+            try:
+                c.execute('INSERT INTO CREATED_TICKETS (USER_ID, CHANNEL_ID, GUILD_ID, CATEGORY) VALUES (?, ?, ?, ?)', (self.user.id, ticket_channel.id, interaction.guild.id, self.category))
+                conn.commit()
+                program_logger.debug(f'Ticket was succesfully created ({self.user.id}, {ticket_channel.id}, {interaction.guild.id}, {self.category}).')
+            except Exception as e:
+                program_logger.error(f'Error while inserting in the database: {e}')
+            await ticket_channel.send(embed=admin_embed, view=admin_view)
+            await ticket_channel.send(embed=ticket_embed)
+            await interaction.response.send_message(f'Your ticket was succesfully created: {ticket_channel.mention}', ephemeral=True)
+
+@tree.command(name='create_ticketsystem', description='creates the ticketsystem.')
+@discord.app_commands.checks.cooldown(1, 2, key=lambda i: (i.guild_id))
+@discord.app_commands.checks.has_permissions(administrator=True)
+@discord.app_commands.describe(channel='In which channel the ticketsystem should be.')
+async def self(interaction: discord.Interaction, channel: discord.TextChannel, supportrole: discord.Role):
+    bot_avatar = bot.user.avatar.url if bot.user.avatar else ''
+    ticketsystem_embed = discord.Embed(
+    title='Ticket System',
+    description='You can create a ticket here. Select a category below.',
+    color=discord.Color.gold(),
+    )
+    ticketsystem_embed.set_footer(text='Ticketbot', icon_url=bot_avatar)
+
+    c.execute('SELECT * FROM TICKET_SYSTEM WHERE GUILD_ID = ?', (interaction.guild_id,))
+    ticketsystem = c.fetchone()
+    if ticketsystem:
+        emb = discord.Embed(
+            title='Ticketsystem',
+            description='A ticket system already exists on this server. If you want to change it, react to the tick at the end of the message',
+            color=discord.Color.dark_gold(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
+            )
+        emb.add_field(name='Channel:', value=f'<#{ticketsystem[2]}>', inline=False)
+        emb.set_footer(text=FOOTER_TEXT, icon_url=bot_avatar)
+        msg = await interaction.channel.send(embed=emb)
+        await msg.add_reaction('✅')
+        def check(reaction, user):
+            return user == interaction.user and str(reaction.emoji) == '✅' and reaction.message.id == msg.id
+        try:
+            reaction, user = await interaction.client.wait_for('reaction_add', timeout=60.0, check=check)
+            if reaction.emoji == '✅':
+                c.execute('UPDATE TICKET_SYSTEM SET CHANNEL = ?, SUPPORT_ROLE = ? WHERE GUILD_ID = ?', (channel.id, supportrole.id ,interaction.guild_id))
+                conn.commit()
+                await interaction.channel.send('✅ Ticketchannel changed succesfully.')
+                await msg.delete()
+                await channel.send(embed=ticketsystem_embed, view=TicketSystemView())
+        except asyncio.TimeoutError:
+            await interaction.channel.send('❌ Time is up.')
+    else:
+        c.execute('UPDATE TICKET_SYSTEM SET CHANNEL = ?, SUPPORT_ROLE = ? WHERE GUILD_ID = ?', (channel.id, supportrole.id ,interaction.guild_id))
+        conn.commit()
+        await channel.send(embed=ticketsystem_embed, view=TicketSystemView())
+        await interaction.response.send_message(content=f'Ticketsystem wurde erfolgreich erstellt.', ephemeral=True)
 
 if __name__ == '__main__':
     if sys.version_info < (3, 11):
